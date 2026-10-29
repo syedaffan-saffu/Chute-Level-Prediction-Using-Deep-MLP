@@ -1,107 +1,133 @@
-# Chute-Level Prediction and Carrier-Speed Advisory
+# GRU-Based Chute-Level Forecasting & Carrier-Speed Advisory
 
-Deep-learning-based chute-level forecasting and operator decision support for sugarcane feeding systems.
+Short-term chute-level forecasting and operator decision support for sugarcane feeding systems, combining electronic mill records, recurrent learning, and a separate bounded carrier-speed advisory.
 
 ## Overview
 
-Uneven sugarcane feeding can cause material to accumulate or fall below the required level in a mill feed chute. Operators need timely information to assess these changes and adjust feeding appropriately.
+Variable cane feeding can cause the material level in a mill chute to rise or fall outside its operating band. Operators need advance information about these changes and practical guidance on feeding adjustments.
 
-This project is designed to predict chute level from recent equipment signals and manual level observations. A compact deep multilayer perceptron (MLP) provides a short-term forecast, while a separate rule-based advisory translates that forecast into warnings and feed-speed recommendations for operator review.
+This project is designed to forecast chute level approximately **30 seconds ahead** using a compact **Gated Recurrent Unit (GRU)** network. Inputs include recent electronic chute-level readings, carrier drive signals, and shredder steam-flow information. A separate supervisory policy converts the forecast into warnings and coordinated **Hz or RPM recommendations** for operator review.
 
-The project connects time-series modeling, industrial process monitoring, and a clear operator interface.
+The design combines measured-data forecasting with a laptop application for recorded replay, additional operating scenarios, and a clear dashboard. The target operating band for the studied mill is **60–75%, inclusive**.
 
-## Objectives
+## System Flow
 
-- Forecast chute level ahead of time using recent operating history.
-- Identify rising accumulation and low-level conditions.
-- Present understandable feed-speed advice alongside the prediction.
-- Account for observation freshness and data quality.
-- Evaluate forecast quality and computational requirements against baseline methods.
+![GRU forecasting workflow from electronic mill records to operator guidance](images/system-flow.png)
 
-## System Workflow
+*Workflow and screen concept. Display values are illustrative.*
 
-```mermaid
-flowchart TD
-    A[Carrier RPM, current and voltage] --> D[Timestamp alignment and quality checks]
-    B[Shredder steam-flow signal] --> D
-    C[Manual chute-level observations] --> D
-    D --> E[Historical windows and observation-age features]
-    E --> F[Deep MLP]
-    F --> G[Future chute-level prediction]
-    G --> H[Separate rule-based advisory]
-    D --> H
-    H --> I[Dashboard: forecast, warning and feed recommendation]
-    I --> J[Operator review and decision]
-```
+1. **Mill records:** electronic level measurements, carrier drive records, steam flow, and status/quality information.
+2. **Preprocessing:** timestamp alignment, quality checks, chronological splits, training-only scaling, and history-window construction.
+3. **Model development:** GRU training and validation, with baseline comparisons and feature ablations.
+4. **Testing application:** held-out recorded replay and a separate generated-scenario mode.
+5. **Inference and advisory:** history buffer, future-level prediction, and bounded carrier-setting suggestions.
+6. **Operator display:** current and predicted level, target band, warning, recommended setting, change, reason, and input freshness.
 
 ## Input Data
 
-| Input group | Information |
+| Signal group | Information |
 | --- | --- |
-| Auxiliary carrier | Motor RPM, current and voltage |
-| Main carrier | Motor RPM, current and voltage |
-| Cane carrier | Motor RPM, current and voltage |
-| Shredder | Turbine steam-flow signal |
-| Chute observations | Manually estimated level, timestamp, observation age and quality |
-| Equipment context | Motor nameplate ratings and operating limits |
+| Chute-level sensor | Electronically recorded level (%), timestamp, and quality flags |
+| Auxiliary carrier | Recorded RPM and/or VFD frequency (Hz), motor current, voltage, and command setting where available |
+| Main carrier | Corresponding drive signals with carrier identifier and timestamp |
+| Cane carrier | Corresponding drive signals, with carrier order and transport delays documented |
+| Shredder turbine | Recorded steam flow with confirmed units |
+| Operating context | Run/stop status, faults, production-run identifier, and data-source information |
+| Equipment metadata | Nameplate ratings, drive limits, gearing, and carrier coordination rules |
 
-Manual chute-level observations are based on wall markings. Motor current provides a load-related signal; it does not directly measure material weight or throughput. Fixed nameplate ratings are equipment metadata rather than changing process measurements.
+The primary data strategy uses authorized **PLC/SCADA exports, drive logs, and electronic level records**. Manual chute-level entry is not part of the forecasting input workflow. Motor current is a mechanical-loading proxy, not a direct measurement of cane weight or throughput. Hz and RPM require a verified mapping before conversion.
 
 ## Model Design
 
-The forecasting approach uses a compact fully connected network:
+The initial sequence-model configuration is:
 
 ```text
-Historical input features
-          |
-     Dense: 64 + ReLU
-          |
-     Dense: 32 + ReLU
-          |
-     Dense: 16 + ReLU
-          |
-   Predicted chute level (%)
+12-step multivariate history at 5-second intervals
+                       |
+        Unidirectional GRU: 32 hidden units
+                       |
+            Dense: 16 units + ReLU
+                       |
+            Dense: 1 unit + Sigmoid
+                       |
+       Chute level at +30 seconds (0–100%)
 ```
 
-The initial design uses a 60-second history and a 30-second prediction horizon, with training-only feature scaling, Huber loss, AdamW optimization and validation-based early stopping. These settings can be refined through experiments.
+The training design uses **Huber loss**, **AdamW**, gradient clipping, weight decay, and validation-based early stopping. History length, hidden size, and layer count are refined through a limited validation search. The initial timing is adjusted to actual logging intervals and process delays.
 
-## Operator Advisory
+Comparison methods are **persistence**, **linear regression**, a **lagged-input MLP**, and a **compact LSTM**. Feature ablations assess carrier-current and steam-flow inputs; a snapshot comparison examines the value of history.
 
-The operating band reported for the visited mill is **60–75%**, inclusive. This is a site-specific requirement.
+## Data Preparation and Evaluation
 
-| Forecast or input condition | Advisory logic |
+- Split actual records chronologically, initially **70% training / 15% validation / 15% test**, before constructing windows.
+- Keep histories and prediction targets within their assigned partitions; use temporal gaps where needed.
+- Fit scaling on training data only and exclude invalid targets, long gaps, and windows crossing shutdowns.
+- Select model settings using validation data and retain the final test partition for evaluation.
+- Assess independent production periods and distinct low/high-level events, rather than relying on row count alone.
+
+Evaluation measures include:
+
+| Area | Measures |
 | --- | --- |
-| Within 60–75% | Hold the existing feed-speed suggestion |
-| Above 75% | Raise a high-level warning and recommend a bounded feed reduction |
-| Below 60% | Recommend a bounded increase only when operating conditions permit |
-| Stale or invalid inputs, suspected restriction, or unknown equipment limits | Suppress numerical speed suggestions and request operator review |
+| Level forecasting | MAE and RMSE in level percentage points, including errors by operating band |
+| Warnings | Precision, recall, false alarms per recorded operating hour, and warning lead time |
+| Model efficiency | Parameter count and CPU inference latency |
+| Robustness | Sensitivity to missing readings, delays, and noise |
+| Advisory behavior | Bounds, carrier coordination, adjustment cooldown, and suppression on invalid conditions |
 
-Carrier-specific RPM recommendations depend on verified speed limits and coordination rules. The advisory supports operator decisions; it does not issue commands to factory drives. A high-level forecast indicates accumulation risk, not proof of blockage.
+## Two Testing Modes
 
-## Dashboard Design
+### Recorded Replay
 
-The Python dashboard is designed to show:
+Held-out mill records are streamed in timestamp order to assess forecasts against measured future levels. Recorded future readings are revealed only when their process timestamps are reached. Replay evaluates forecasting and advisory logic; it cannot establish the physical outcome of a newly suggested carrier setting.
 
-- Latest chute-level observation and its freshness.
-- Predicted future level and recent trends.
-- Target operating band and warning status.
-- Recommended feed action and carrier-speed suggestions where valid.
-- Input-quality messages requiring operator attention.
+### Generated Operating Scenarios
 
-## Evaluation
+Coherent operating sequences provide supplemental tests for feed changes, accumulation, restricted discharge, and imperfect inputs. Scenario responses are reported separately from measured-data forecast accuracy. Generated scenarios do not replace the primary training or test records.
 
-The evaluation design compares the history-based MLP with persistence, linear regression and a snapshot MLP. Separate feature comparisons examine the contribution of motor-current signals and observation-age information.
+The laptop demonstration supports normal or accelerated playback without requiring a live factory connection.
 
-Measures include MAE and RMSE in level percentage points, warning precision and recall, false alarms, warning lead time and CPU inference latency. Complete operating episodes are separated before constructing training and test windows to reduce data leakage.
+## Carrier-Speed Advisory
+
+The **GRU predicts level**. A separate policy produces carrier-setting recommendations; the network does not learn invented optimal-speed labels.
+
+| Forecast or validity condition | Operator-facing advice |
+| --- | --- |
+| 60–75%, inclusive | Hold current feed setting and continue monitoring |
+| Above 75% | High-level warning and bounded feed reduction, following the carrier coordination rule |
+| Below 60% | Bounded increase only when the mill is running normally and no restriction or fault is flagged |
+| Fault, suspected blockage, stale data, or unverified limits | Suppress numerical suggestions and request operator review |
+
+Carrier settings use one declared command unit: preferably VFD frequency in **Hz**, otherwise verified **RPM**. Recommendations respect minimum/maximum settings, per-update change limits, carrier sequencing, and a transport-delay-aware cooldown. Current-level alarms remain separate from forecast warnings.
+
+Demonstration settings are distinct from engineer-approved plant limits. Operators retain decision authority, and the application does not send commands to factory drives. A high-level forecast is not a blockage diagnosis.
+
+## Dashboard
+
+The dashboard design presents:
+
+- Current sensor level and predicted level at the forecast horizon.
+- The 60–75% target band and current/forecast warning status.
+- Current and recommended Hz/RPM settings, setting change, and action reason.
+- Data-source mode, timestamps, and input freshness.
+- Messages requiring inspection or data-quality review.
+
+## Project Poster
+
+[![Light-theme project poster](poster/chute-level-poster-light.png)](poster/chute-level-poster-light.pdf)
+
+[Download poster PDF](poster/chute-level-poster-light.pdf) · [Open system-flow image](images/system-flow.png) · [Read project proposal](docs/Chute_Level_DL_Proposal.pdf)
+
+The visuals are presentation concepts with illustrative screen values, not measured performance results. The workflow image uses built-in image generation; its [generation prompt](images/system-flow-generation-prompt.md) is included for reference.
 
 ## Technology Stack
 
-The technical design uses **Python, NumPy, pandas, PyTorch and scikit-learn**, with a local Python dashboard for visualization and operator interaction.
+**Python · NumPy · pandas · PyTorch · scikit-learn · Local Python dashboard**
 
 ## Author
 
 **Syed Affan Ali**  
-Deep Learning coursework project — MS Artificial Intelligence  
+Deep Learning coursework — MS Artificial Intelligence  
 NED University of Engineering and Technology, Karachi
 
 [Portfolio](https://syedaffan-saffu.github.io/) · [GitHub](https://github.com/syedaffan-saffu)
